@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/imageoverlay.tsx","./src/lineslist.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/ocr/postprocess.ts","./src/ocr/preprocess.ts","./src/ocr/protocol.ts","./src/ocr/worker.ts"],"version":"5.9.3"}
