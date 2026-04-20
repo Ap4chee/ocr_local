@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { initOcr, onOcrWarning, postOcr, postOcrRaw, runDiagnostics } from "./api";
+import { initOcr, onOcrWarning, postOcr, runDiagnostics } from "./api";
 import { ImageOverlay } from "./ImageOverlay";
 import { LinesList } from "./LinesList";
-import { ComparePanel } from "./ComparePanel";
 import type { DiagnosticReport } from "./ocr/protocol";
 import type { OcrResponse } from "./types";
+
+const MIN_CONF = 0.85;
 
 type EngineStatus =
   | { state: "loading" }
@@ -19,21 +20,14 @@ export function App() {
   const [engine, setEngine] = useState<EngineStatus>({ state: "loading" });
   const [warning, setWarning] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<number | null>(null);
-  const [minConf, setMinConf] = useState(0);
   const [diag, setDiag] = useState<DiagnosticReport | null>(null);
   const [diagRunning, setDiagRunning] = useState(false);
   const [diagError, setDiagError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [imageDims, setImageDims] = useState<{ w: number; h: number } | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [enhanceMs, setEnhanceMs] = useState(0);
-  const [currentFile, setCurrentFile] = useState<File | null>(null);
-  const [rawResult, setRawResult] = useState<OcrResponse | null>(null);
-  const [rawLoading, setRawLoading] = useState(false);
-  const [compareError, setCompareError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const visibleLines = result ? result.lines.filter((l) => l.conf >= minConf) : [];
+  const visibleLines = result ? result.lines.filter((l) => l.conf > MIN_CONF) : [];
 
   useEffect(() => {
     const off = onOcrWarning(setWarning);
@@ -48,10 +42,6 @@ export function App() {
   useEffect(() => {
     return () => { if (imageUrl) URL.revokeObjectURL(imageUrl); };
   }, [imageUrl]);
-
-  useEffect(() => {
-    return () => { if (previewUrl) URL.revokeObjectURL(previewUrl); };
-  }, [previewUrl]);
 
   useEffect(() => {
     function onPaste(e: ClipboardEvent) {
@@ -72,30 +62,11 @@ export function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, []);
 
-  async function handleCompare() {
-    if (!currentFile || !result) return;
-    setRawResult(null);
-    setCompareError(null);
-    setRawLoading(true);
-    try {
-      setRawResult(await postOcrRaw(currentFile));
-    } catch (e) {
-      setCompareError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRawLoading(false);
-    }
-  }
-
   async function handleFile(file: File) {
     setError(null);
     setResult(null);
     setHighlight(null);
     setImageDims(null);
-    setPreviewUrl(null);
-    setEnhanceMs(0);
-    setCurrentFile(file);
-    setRawResult(null);
-    setCompareError(null);
     if (imageUrl) URL.revokeObjectURL(imageUrl);
     const url = URL.createObjectURL(file);
     setImageUrl(url);
@@ -106,9 +77,7 @@ export function App() {
 
     setLoading(true);
     try {
-      const { result, previewUrl: pUrl, enhanceMs: ms } = await postOcr(file);
-      setResult(result);
-      if (pUrl) { setPreviewUrl(pUrl); setEnhanceMs(ms); }
+      setResult(await postOcr(file));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -140,7 +109,7 @@ export function App() {
     engine.state === "loading" ? "loading"
     : engine.state === "error" ? "bad"
     : engine.backend === "webgpu" ? "ok"
-    : ""; // wasm = no special class
+    : "";
 
   const engineLabel =
     engine.state === "loading" ? "Ładowanie modeli…"
@@ -322,14 +291,6 @@ export function App() {
           <div className="stat-chip">
             czas <strong>{result.time_s.toFixed(2)} s</strong>
           </div>
-          {enhanceMs > 0 && (
-            <>
-              <div className="stat-divider" />
-              <div className="stat-chip">
-                preprocessing <strong>{enhanceMs.toFixed(0)} ms</strong>
-              </div>
-            </>
-          )}
           {imageDims && (
             <>
               <div className="stat-divider" />
@@ -338,123 +299,7 @@ export function App() {
               </div>
             </>
           )}
-          {previewUrl && (
-            <>
-              <div className="stat-divider" />
-              <button
-                className="btn btn-compare"
-                onClick={handleCompare}
-                disabled={rawLoading || loading}
-              >
-                {rawLoading
-                  ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />Porównuję…</>
-                  : rawResult ? "Odśwież porównanie" : "Porównaj bez preproc."
-                }
-              </button>
-            </>
-          )}
-          <label className="conf-filter" htmlFor="conf-checkbox">
-            <input
-              type="checkbox"
-              id="conf-checkbox"
-              checked={minConf >= 0.9}
-              onChange={(e) => {
-                setMinConf(e.target.checked ? 0.9 : 0);
-                setHighlight(null);
-              }}
-            />
-            tylko ≥ 90%
-          </label>
         </div>
-      )}
-
-      {/* ── COMPARE PANEL ── */}
-      {compareError && (
-        <div className="alert alert-error" role="alert">
-          <svg className="alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          <span>Błąd porównania: {compareError}</span>
-        </div>
-      )}
-      {result && rawResult && (
-        <ComparePanel
-          enhanced={result}
-          raw={rawResult}
-          enhanceMs={enhanceMs}
-          onClose={() => setRawResult(null)}
-        />
-      )}
-
-      {/* ── DEBUG ── */}
-      {result?.debug && (
-        <details className="debug-details">
-          <summary className="debug-summary">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <polyline points="9 18 15 12 9 6"/>
-            </svg>
-            DB debug
-          </summary>
-          <div className="debug-body">
-            <div className="debug-row">
-              <span className="debug-key">det shape:</span>
-              <span className="debug-val">[{result.debug.detShape.join(", ")}]</span>
-              <span className="debug-key">out:</span>
-              <span className="debug-val">[{result.debug.detDims.join(", ")}]</span>
-            </div>
-            <div className="debug-row">
-              <span className="debug-key">prob map:</span>
-              <span className="debug-val">min={result.debug.probMin.toFixed(4)}</span>
-              <span className="debug-val">max={result.debug.probMax.toFixed(4)}</span>
-              <span className="debug-val">mean={result.debug.probMean.toFixed(4)}</span>
-            </div>
-            <div className="debug-row">
-              <span className="debug-key">px &gt; 0.3:</span>
-              <span className="debug-val">{result.debug.pixelsAboveThresh}/{result.debug.detDims.slice(-2).reduce((a,b) => a*b, 1)}</span>
-            </div>
-            <hr className="debug-sep" />
-            <div className="debug-row">
-              <span className="debug-key">components:</span>
-              <span className="debug-val">raw={result.debug.rawComponents}</span>
-              <span className="debug-val">minSize={result.debug.survivedMinSize}</span>
-              <span className="debug-val">score={result.debug.survivedScore}</span>
-              <span className="debug-val">final={result.debug.survivedFinalSize}</span>
-            </div>
-            <div className="debug-row">
-              <span className="debug-key">scoreMaxRej:</span>
-              <span className="debug-val">{result.debug.scoreMaxOfRejected.toFixed(4)}</span>
-            </div>
-            <hr className="debug-sep" />
-            <div className="debug-row">
-              <span className="debug-key">boxes:</span>
-              <span className="debug-val">{result.debug.boxesDetected} → lines: {result.debug.linesRecognized}</span>
-            </div>
-            <div className="debug-row">
-              <span className="debug-key">rec dims:</span>
-              <span className="debug-val">[{result.debug.recOutputDims?.join(", ") ?? "—"}]</span>
-              <span className="debug-key">vocab:</span>
-              <span className="debug-val">{result.debug.recVocabSize ?? "—"}</span>
-              <span className="debug-key">dict:</span>
-              <span className="debug-val">{result.debug.dictSize}</span>
-            </div>
-            {result.debug.firstBoxWH && (
-              <div className="debug-row">
-                <span className="debug-key">box[0]:</span>
-                <span className="debug-val">{result.debug.firstBoxWH[0]}×{result.debug.firstBoxWH[1]}px</span>
-                {result.debug.firstBoxWH[1] > 80 && <span className="debug-warn">⚠ bardzo wysoki</span>}
-                {result.debug.firstBoxWH[0] < 20 && <span className="debug-warn">⚠ bardzo wąski</span>}
-              </div>
-            )}
-            {result.debug.firstBoxArgmax && (
-              <div className="debug-row" style={{ flexWrap: "nowrap", overflow: "hidden" }}>
-                <span className="debug-key">argmax:</span>
-                <span className="debug-val" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  [{result.debug.firstBoxArgmax.join(", ")}]
-                </span>
-              </div>
-            )}
-          </div>
-        </details>
       )}
 
       {/* ── RESULTS ── */}
@@ -462,8 +307,7 @@ export function App() {
         <div className="results">
           <div className="viewer-wrap">
             <ImageOverlay
-              imageUrl={previewUrl ?? imageUrl}
-              beforeUrl={previewUrl ? imageUrl : undefined}
+              imageUrl={imageUrl}
               lines={visibleLines}
               highlightIdx={highlight}
               onHover={setHighlight}

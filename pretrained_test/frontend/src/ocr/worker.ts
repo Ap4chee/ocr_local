@@ -16,8 +16,6 @@ const POLISH_DIACRITICS = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ";
 
 declare const self: DedicatedWorkerGlobalScope & typeof globalThis;
 
-// Loader .mjs nie może siedzieć w /public (Vite blokuje jego import z source).
-// CDN = zero konfiguracji; wersja zsynchronizowana z package.json.
 ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/";
 ort.env.wasm.numThreads = Math.min(navigator.hardwareConcurrency ?? 4, 8);
 
@@ -38,9 +36,6 @@ async function loadDict(): Promise<string[]> {
   const chars = txt
     .split(/\r?\n/)
     .filter((line, i, arr) => i < arr.length - 1 || line.length > 0);
-  // PaddleOCR: pliki dicta nie zawierają linii ze spacją, ale modele trenowane
-  // z `use_space_char=True` (latin/en/multilingual) mają spację jako ostatnią klasę
-  // vocabu (indeks = dict.length+1). Bez tego łączące się słowa zwracane są bez " ".
   chars.push(" ");
   return chars;
 }
@@ -55,7 +50,6 @@ async function init() {
   }
   const eps: any[] = hasWebGPU ? ["webgpu", "wasm"] : ["wasm"];
 
-  // Cache modeli w IDB: pierwsze uruchomienie fetch + zapis; każde kolejne — odczyt z IDB.
   let detBytes: Uint8Array;
   let recBytes: Uint8Array;
   try {
@@ -82,8 +76,6 @@ async function init() {
 
   dict = await loadDict();
 
-  // Warm-up na REALNYCH kształtach — WebGPU kompiluje shadery per-shape, więc
-  // rozgrzewka 32×32 nie pokrywa inferencji 736×960. Dużo lepsze „time to first OCR".
   try {
     const detH = 736, detW = 960;
     const detDummy = new Float32Array(3 * detH * detW);
@@ -98,7 +90,6 @@ async function init() {
     });
   } catch { /* niekrytyczne */ }
 
-  // Walidacja pokrycia polskich diakrytyków — od razu wiemy czy ten model ma sens na PL.
   const missing: string[] = [];
   for (const ch of POLISH_DIACRITICS) {
     if (!dict.includes(ch)) missing.push(ch);
@@ -117,32 +108,16 @@ async function init() {
   post({ type: "ready", backend });
 }
 
-async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBitmap) {
+async function runOcr(id: number, bitmap: ImageBitmap) {
   if (!detSession || !recSession) throw new Error("Sesje nie zainicjalizowane");
-  // bitmap        = enhanced (CLAHE+unsharp) — used for detection only
-  // originalBitmap = raw original            — used for recognition crops
-  // When originalBitmap is absent (no enhancement), bitmap is used for both.
-  const recBitmap = originalBitmap ?? bitmap;
   const t0 = performance.now();
 
-  // === detekcja ===
   const det = preprocessDet(bitmap);
   const detTensor = new ort.Tensor("float32", det.tensor, det.shape);
   const detOut = await detSession.run({ [detSession.inputNames[0]]: detTensor });
   const probTensor = detOut[detSession.outputNames[0]];
   const probData = probTensor.data as Float32Array;
-  // shape: [1, 1, H, W]
   const [, , mapH, mapW] = probTensor.dims as number[];
-
-  // statystyki probability mapy — do debugowania „nic nie znajduje"
-  let pMin = Infinity, pMax = -Infinity, pSum = 0;
-  for (let i = 0; i < probData.length; i++) {
-    const v = probData[i];
-    if (v < pMin) pMin = v;
-    if (v > pMax) pMax = v;
-    pSum += v;
-  }
-  const pMean = pSum / probData.length;
 
   const dbResult = dbPostprocess(
     probData,
@@ -153,27 +128,8 @@ async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBit
     det.origW,
     det.origH,
   );
-  let boxes = sortBoxes(dbResult.boxes);
+  const boxes = sortBoxes(dbResult.boxes);
 
-  // === rozpoznawanie — batchowane po szerokości ===
-  // Zamiast N odpaleń recSession.run robimy grupy po ~REC_BATCH_SIZE crop-ów o zbliżonej
-  // szerokości (po resize do H=48). Pad do max W w grupie białym → mało zmarnowanej pracy.
-  // Na dokumencie z 40 liniami to 3–5× szybsze niż per-line.
-  let firstRecDims: number[] | null = null;
-  let firstRecV: number | null = null;
-  let firstBoxArgmax: number[] | null = null;
-  let firstBoxMaxIndex: number | null = null;
-  let firstBoxWH: [number, number] | null = null;
-
-  if (boxes.length > 0) {
-    const b = boxes[0];
-    const bw = Math.hypot(b[1][0] - b[0][0], b[1][1] - b[0][1]);
-    const bh = Math.hypot(b[3][0] - b[0][0], b[3][1] - b[0][1]);
-    firstBoxWH = [Math.round(bw), Math.round(bh)];
-  }
-
-  // Każdy box ma origIdx = pozycja w porządku czytania (po sortBoxes).
-  // Sortujemy po docelowej szerokości rosnąco, żeby minimalizować padding w batchach.
   const indexed = boxes.map((box, origIdx) => ({
     box,
     origIdx,
@@ -181,27 +137,21 @@ async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBit
   }));
   indexed.sort((a, b) => a.targetW - b.targetW);
 
-  // results[origIdx] będzie zawierać linię lub null (pusty tekst)
   const results: (OcrLine | null)[] = new Array(boxes.length).fill(null);
-  // który element batcha (globalnie) jest „pierwszy" dla celów debugu — chcemy ten
-  // w porządku czytania (origIdx === 0)
-  let debugBoxOrigIdx = -1;
 
   for (let start = 0; start < indexed.length; start += REC_BATCH_SIZE) {
     const group = indexed.slice(start, start + REC_BATCH_SIZE);
-    const batchIn = preprocessRecBatch(recBitmap, group.map((g) => g.box));
+    const batchIn = preprocessRecBatch(bitmap, group.map((g) => g.box));
     const recTensor = new ort.Tensor("float32", batchIn.tensor, batchIn.shape);
     const recOut = await recSession.run({ [recSession.inputNames[0]]: recTensor });
     const logits = recOut[recSession.outputNames[0]];
-    const dims = logits.dims as number[]; // [B, T, V]
+    const dims = logits.dims as number[];
     const B = dims[0];
     const T = dims[1];
     const V = dims[2];
     const data = logits.data as Float32Array;
     const stride = T * V;
 
-    // Sanity check: dict.length + 1 (blank) powinno się równać V z modelu.
-    // Jeśli się rozjeżdża, dekodowanie produkuje śmieci albo gubi znaki.
     if (!vocabCheckDone) {
       vocabCheckDone = true;
       const expected = dict.length + 1;
@@ -219,34 +169,6 @@ async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBit
     for (let j = 0; j < B; j++) {
       const slice = data.subarray(j * stride, (j + 1) * stride);
       const { text, conf } = ctcDecode(slice, T, V, dict);
-
-      // Debug dla pierwszego w porządku czytania
-      if (group[j].origIdx === 0 || (debugBoxOrigIdx === -1 && j === 0 && start === 0)) {
-        if (firstRecDims === null) {
-          firstRecDims = [1, T, V];
-          firstRecV = V;
-          const argmax: number[] = [];
-          let maxIdx = 0;
-          for (let t = 0; t < T; t++) {
-            const off = t * V;
-            let best = 0;
-            let bestVal = slice[off];
-            for (let v = 1; v < V; v++) {
-              const x = slice[off + v];
-              if (x > bestVal) {
-                bestVal = x;
-                best = v;
-              }
-            }
-            if (t < 40) argmax.push(best);
-            if (best > maxIdx) maxIdx = best;
-          }
-          firstBoxArgmax = argmax;
-          firstBoxMaxIndex = maxIdx;
-          debugBoxOrigIdx = group[j].origIdx;
-        }
-      }
-
       if (text.length > 0) {
         results[group[j].origIdx] = {
           text,
@@ -258,9 +180,7 @@ async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBit
   }
 
   const lines: OcrLine[] = results.filter((l): l is OcrLine => l !== null);
-
   bitmap.close();
-  originalBitmap?.close();
 
   const dt = (performance.now() - t0) / 1000;
   const meanConf = lines.length ? lines.reduce((s, l) => s + l.conf, 0) / lines.length : 0;
@@ -270,27 +190,6 @@ async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBit
     mean_conf: Math.round(meanConf * 10000) / 10000,
     time_s: Math.round(dt * 1000) / 1000,
     lines,
-    debug: {
-      detDims: probTensor.dims as number[],
-      detShape: det.shape as number[],
-      probMin: pMin,
-      probMax: pMax,
-      probMean: pMean,
-      pixelsAboveThresh: dbResult.stats.pixelsAboveThresh,
-      rawComponents: dbResult.stats.rawComponents,
-      survivedMinSize: dbResult.stats.survivedMinSize,
-      survivedScore: dbResult.stats.survivedScore,
-      survivedFinalSize: dbResult.stats.survivedFinalSize,
-      scoreMaxOfRejected: dbResult.stats.scoreMaxOfRejected,
-      boxesDetected: boxes.length,
-      linesRecognized: lines.length,
-      dictSize: dict.length,
-      recOutputDims: firstRecDims,
-      recVocabSize: firstRecV,
-      firstBoxArgmax,
-      firstBoxMaxIndex,
-      firstBoxWH,
-    },
   };
   post({ type: "result", id, payload });
 }
@@ -394,7 +293,7 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
     if (msg.type === "init") {
       await init();
     } else if (msg.type === "ocr") {
-      await runOcr(msg.id, msg.bitmap, msg.originalBitmap);
+      await runOcr(msg.id, msg.bitmap);
     } else if (msg.type === "diagnose") {
       await diagnose(msg.id);
     }

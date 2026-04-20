@@ -1,6 +1,5 @@
 import type { OcrResponse } from "./types";
 import type { DiagnosticReport, WorkerRequest, WorkerResponse } from "./ocr/protocol";
-import { enhanceForOcr } from "./ocr/imageEnhance";
 
 export type BackendStatus =
   | { state: "loading" }
@@ -68,7 +67,7 @@ export function onOcrWarning(cb: (msg: string) => void): () => void {
   return () => warningListeners.delete(cb);
 }
 
-export async function postOcrRaw(file: File): Promise<OcrResponse> {
+export async function postOcr(file: File): Promise<OcrResponse> {
   await initOcr();
   const w = ensureWorker();
   const bitmap = await createImageBitmap(file);
@@ -78,44 +77,6 @@ export async function postOcrRaw(file: File): Promise<OcrResponse> {
   });
   w.postMessage({ type: "ocr", id, bitmap } as WorkerRequest, [bitmap]);
   return promise;
-}
-
-export interface OcrResult {
-  result: OcrResponse;
-  previewUrl: string;
-  enhanceMs: number;
-}
-
-export async function postOcr(file: File): Promise<OcrResult> {
-  await initOcr();
-  const w = ensureWorker();
-  const original = await createImageBitmap(file);
-
-  let detBitmap: ImageBitmap = original;
-  let recBitmap: ImageBitmap | undefined;   // undefined = worker reuses detBitmap
-  let previewUrl = "";
-  let enhanceMs = 0;
-
-  try {
-    const enh = await enhanceForOcr(original);
-    detBitmap = enh.enhanced;   // enhanced → detection only
-    recBitmap = original;        // original → recognition crops
-    previewUrl = enh.previewUrl;
-    enhanceMs = enh.ms;
-  } catch {
-    // Enhancement failed — detBitmap === original, no separate recBitmap
-  }
-
-  const id = nextId++;
-  const promise = new Promise<OcrResponse>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-  });
-  const transferables: Transferable[] = [detBitmap];
-  if (recBitmap) transferables.push(recBitmap);
-  const req: WorkerRequest = { type: "ocr", id, bitmap: detBitmap, originalBitmap: recBitmap };
-  w.postMessage(req, transferables);
-  const result = await promise;
-  return { result, previewUrl, enhanceMs };
 }
 
 export async function runDiagnostics(): Promise<DiagnosticReport> {
