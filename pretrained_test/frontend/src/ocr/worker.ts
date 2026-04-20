@@ -117,8 +117,12 @@ async function init() {
   post({ type: "ready", backend });
 }
 
-async function runOcr(id: number, bitmap: ImageBitmap) {
+async function runOcr(id: number, bitmap: ImageBitmap, originalBitmap?: ImageBitmap) {
   if (!detSession || !recSession) throw new Error("Sesje nie zainicjalizowane");
+  // bitmap        = enhanced (CLAHE+unsharp) — used for detection only
+  // originalBitmap = raw original            — used for recognition crops
+  // When originalBitmap is absent (no enhancement), bitmap is used for both.
+  const recBitmap = originalBitmap ?? bitmap;
   const t0 = performance.now();
 
   // === detekcja ===
@@ -185,7 +189,7 @@ async function runOcr(id: number, bitmap: ImageBitmap) {
 
   for (let start = 0; start < indexed.length; start += REC_BATCH_SIZE) {
     const group = indexed.slice(start, start + REC_BATCH_SIZE);
-    const batchIn = preprocessRecBatch(bitmap, group.map((g) => g.box));
+    const batchIn = preprocessRecBatch(recBitmap, group.map((g) => g.box));
     const recTensor = new ort.Tensor("float32", batchIn.tensor, batchIn.shape);
     const recOut = await recSession.run({ [recSession.inputNames[0]]: recTensor });
     const logits = recOut[recSession.outputNames[0]];
@@ -256,6 +260,7 @@ async function runOcr(id: number, bitmap: ImageBitmap) {
   const lines: OcrLine[] = results.filter((l): l is OcrLine => l !== null);
 
   bitmap.close();
+  originalBitmap?.close();
 
   const dt = (performance.now() - t0) / 1000;
   const meanConf = lines.length ? lines.reduce((s, l) => s + l.conf, 0) / lines.length : 0;
@@ -389,7 +394,7 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
     if (msg.type === "init") {
       await init();
     } else if (msg.type === "ocr") {
-      await runOcr(msg.id, msg.bitmap);
+      await runOcr(msg.id, msg.bitmap, msg.originalBitmap);
     } else if (msg.type === "diagnose") {
       await diagnose(msg.id);
     }

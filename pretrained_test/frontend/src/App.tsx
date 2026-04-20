@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { initOcr, onOcrWarning, postOcr, runDiagnostics } from "./api";
+import { initOcr, onOcrWarning, postOcr, postOcrRaw, runDiagnostics } from "./api";
 import { ImageOverlay } from "./ImageOverlay";
 import { LinesList } from "./LinesList";
+import { ComparePanel } from "./ComparePanel";
 import type { DiagnosticReport } from "./ocr/protocol";
 import type { OcrResponse } from "./types";
 
@@ -26,6 +27,10 @@ export function App() {
   const [imageDims, setImageDims] = useState<{ w: number; h: number } | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [enhanceMs, setEnhanceMs] = useState(0);
+  const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const [rawResult, setRawResult] = useState<OcrResponse | null>(null);
+  const [rawLoading, setRawLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const visibleLines = result ? result.lines.filter((l) => l.conf >= minConf) : [];
@@ -67,6 +72,20 @@ export function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, []);
 
+  async function handleCompare() {
+    if (!currentFile || !result) return;
+    setRawResult(null);
+    setCompareError(null);
+    setRawLoading(true);
+    try {
+      setRawResult(await postOcrRaw(currentFile));
+    } catch (e) {
+      setCompareError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRawLoading(false);
+    }
+  }
+
   async function handleFile(file: File) {
     setError(null);
     setResult(null);
@@ -74,6 +93,9 @@ export function App() {
     setImageDims(null);
     setPreviewUrl(null);
     setEnhanceMs(0);
+    setCurrentFile(file);
+    setRawResult(null);
+    setCompareError(null);
     if (imageUrl) URL.revokeObjectURL(imageUrl);
     const url = URL.createObjectURL(file);
     setImageUrl(url);
@@ -316,6 +338,21 @@ export function App() {
               </div>
             </>
           )}
+          {previewUrl && (
+            <>
+              <div className="stat-divider" />
+              <button
+                className="btn btn-compare"
+                onClick={handleCompare}
+                disabled={rawLoading || loading}
+              >
+                {rawLoading
+                  ? <><span className="spinner" style={{ width: 12, height: 12, borderWidth: 2 }} />Porównuję…</>
+                  : rawResult ? "Odśwież porównanie" : "Porównaj bez preproc."
+                }
+              </button>
+            </>
+          )}
           <label className="conf-filter" htmlFor="conf-checkbox">
             <input
               type="checkbox"
@@ -329,6 +366,24 @@ export function App() {
             tylko ≥ 90%
           </label>
         </div>
+      )}
+
+      {/* ── COMPARE PANEL ── */}
+      {compareError && (
+        <div className="alert alert-error" role="alert">
+          <svg className="alert-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span>Błąd porównania: {compareError}</span>
+        </div>
+      )}
+      {result && rawResult && (
+        <ComparePanel
+          enhanced={result}
+          raw={rawResult}
+          enhanceMs={enhanceMs}
+          onClose={() => setRawResult(null)}
+        />
       )}
 
       {/* ── DEBUG ── */}

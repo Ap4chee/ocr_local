@@ -2,7 +2,7 @@ import type { OcrResponse } from "../types";
 
 export type WorkerRequest =
   | { type: "init" }
-  | { type: "ocr"; id: number; bitmap: ImageBitmap }
+  | { type: "ocr"; id: number; bitmap: ImageBitmap; originalBitmap?: ImageBitmap }
   | { type: "diagnose"; id: number };
 
 export interface EpReport {

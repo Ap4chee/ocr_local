@@ -68,6 +68,18 @@ export function onOcrWarning(cb: (msg: string) => void): () => void {
   return () => warningListeners.delete(cb);
 }
 
+export async function postOcrRaw(file: File): Promise<OcrResponse> {
+  await initOcr();
+  const w = ensureWorker();
+  const bitmap = await createImageBitmap(file);
+  const id = nextId++;
+  const promise = new Promise<OcrResponse>((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+  });
+  w.postMessage({ type: "ocr", id, bitmap } as WorkerRequest, [bitmap]);
+  return promise;
+}
+
 export interface OcrResult {
   result: OcrResponse;
   previewUrl: string;
@@ -79,26 +91,29 @@ export async function postOcr(file: File): Promise<OcrResult> {
   const w = ensureWorker();
   const original = await createImageBitmap(file);
 
-  let bitmapToSend: ImageBitmap = original;
+  let detBitmap: ImageBitmap = original;
+  let recBitmap: ImageBitmap | undefined;   // undefined = worker reuses detBitmap
   let previewUrl = "";
   let enhanceMs = 0;
 
   try {
-    const enhanced = await enhanceForOcr(original);
-    original.close();
-    bitmapToSend = enhanced.enhanced;
-    previewUrl = enhanced.previewUrl;
-    enhanceMs = enhanced.ms;
+    const enh = await enhanceForOcr(original);
+    detBitmap = enh.enhanced;   // enhanced → detection only
+    recBitmap = original;        // original → recognition crops
+    previewUrl = enh.previewUrl;
+    enhanceMs = enh.ms;
   } catch {
-    // Enhancement failed — fall back to unprocessed bitmap
+    // Enhancement failed — detBitmap === original, no separate recBitmap
   }
 
   const id = nextId++;
   const promise = new Promise<OcrResponse>((resolve, reject) => {
     pending.set(id, { resolve, reject });
   });
-  const req: WorkerRequest = { type: "ocr", id, bitmap: bitmapToSend };
-  w.postMessage(req, [bitmapToSend]);
+  const transferables: Transferable[] = [detBitmap];
+  if (recBitmap) transferables.push(recBitmap);
+  const req: WorkerRequest = { type: "ocr", id, bitmap: detBitmap, originalBitmap: recBitmap };
+  w.postMessage(req, transferables);
   const result = await promise;
   return { result, previewUrl, enhanceMs };
 }
